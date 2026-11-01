@@ -1,0 +1,1 @@
+"""Aemeath visual identity core."""

@@ -1,0 +1,169 @@
+{
+  "enabled": {
+    "description": "启用爱弥斯视觉身份插件",
+    "type": "bool",
+    "default": true
+  },
+  "inject_identity": {
+    "description": "每次对话注入固定视觉身份",
+    "type": "bool",
+    "default": true
+  },
+  "natural_trigger": {
+    "description": "允许自然语言触发生图",
+    "type": "bool",
+    "default": true
+  },
+  "planner_enabled": {
+    "description": "让 MiMo 自动决定场景、姿势、服装（不建议开启）",
+    "type": "bool",
+    "default": false
+  },
+  "deepseek_context_enabled": {
+    "description": "用 DeepSeek 从会话上下文提取生活状态",
+    "type": "bool",
+    "default": true
+  },
+  "deepseek_base_url": {
+    "description": "DeepSeek Base URL",
+    "type": "string",
+    "default": "https://api.deepseek.com/v1"
+  },
+  "deepseek_api_key": {
+    "description": "DeepSeek API Key（用于上下文提取）",
+    "type": "string",
+    "default": ""
+  },
+  "deepseek_model": {
+    "description": "DeepSeek 模型",
+    "type": "string",
+    "default": "deepseek-chat"
+  },
+  "life_state_enabled": {
+    "description": "读取 private_companion 的当前生活状态",
+    "type": "bool",
+    "default": true
+  },
+  "life_state_plugin_name": {
+    "description": "生活状态插件名",
+    "type": "string",
+    "default": "astrbot_plugin_private_companion"
+  },
+  "life_state_cache_seconds": {
+    "description": "生活状态缓存秒数",
+    "type": "int",
+    "default": 30
+  },
+  "vision_provider": {
+    "description": "视觉分析后端",
+    "type": "string",
+    "options": ["claude", "mimo"],
+    "labels": ["Claude（细）", "MiMo（便宜）"],
+    "default": "claude"
+  },
+  "claude_base_url": {
+    "description": "Claude 兼容 Base URL",
+    "type": "string",
+    "default": "https://qa.dashun9527.com"
+  },
+  "claude_api_key": {
+    "description": "Claude API Key",
+    "type": "string",
+    "default": ""
+  },
+  "claude_model": {
+    "description": "Claude 模型",
+    "type": "string",
+    "default": "claude-sonnet-4-5"
+  },
+  "mimo_base_url": {
+    "description": "MiMo Base URL",
+    "type": "string",
+    "default": "https://api.xiaomimimo.com/v1"
+  },
+  "mimo_api_key": {
+    "description": "MiMo API Key",
+    "type": "string",
+    "default": ""
+  },
+  "mimo_model": {
+    "description": "MiMo 模型",
+    "type": "string",
+    "default": "mimo-v2.6-flash"
+  },
+  "gpt_image_enabled": {
+    "description": "启用 gpt-image-2",
+    "type": "bool",
+    "default": true
+  },
+  "gpt_image_base_url": {
+    "description": "gpt-image Base URL",
+    "type": "string",
+    "default": "https://qacn.dashun9527.com/v1"
+  },
+  "gpt_image_api_key": {
+    "description": "gpt-image API Key",
+    "type": "string",
+    "default": ""
+  },
+  "gpt_image_model": {
+    "description": "gpt-image 模型",
+    "type": "string",
+    "default": "gpt-image-2"
+  },
+  "qwen_image_enabled": {
+    "description": "启用 qwen-image 回退",
+    "type": "bool",
+    "default": true
+  },
+  "qwen_image_base_url": {
+    "description": "qwen-image Base URL",
+    "type": "string",
+    "default": "https://dashscope.aliyuncs.com"
+  },
+  "qwen_image_api_key": {
+    "description": "qwen-image API Key",
+    "type": "string",
+    "default": ""
+  },
+  "qwen_image_model": {
+    "description": "qwen-image 模型",
+    "type": "string",
+    "default": "qwen-image-3.0"
+  },
+  "image_size": {
+    "description": "生图尺寸",
+    "type": "string",
+    "default": "1024x1536"
+  },
+  "quality_check": {
+    "description": "生成后用视觉模型检查一致性",
+    "type": "bool",
+    "default": true
+  },
+  "candidates": {
+    "description": "每次生成候选图数量（1-4）",
+    "type": "int",
+    "default": 1
+  },
+  "quality_threshold": {
+    "description": "候选图一致性阈值",
+    "type": "float",
+    "default": 0.6
+  },
+  "gpt_image_cost": {
+    "description": "gpt-image-2 单张估算成本（元）",
+    "type": "float",
+    "default": 0.18
+  },
+  "qwen_image_cost": {
+    "description": "qwen-image-3.0 单张估算成本（元）",
+    "type": "float",
+    "default": 0.08
+  },
+  "calibration_limit": {
+    "description": "视觉校准最多分析几张官方图",
+    "type": "int",
+    "default": 13
+  }
+}

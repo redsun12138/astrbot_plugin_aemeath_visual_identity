@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+data/
+*.log
+.env
+*.bak
+*.bak-*
+test_out/
+local_check/
+qwen_test*/
