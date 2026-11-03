@@ -14,6 +14,11 @@
     "type": "bool",
     "default": true
   },
+  "delegated_only": {
+    "description": "只接受主插件委托生图，不自动抢普通聊天（方案 A）",
+    "type": "bool",
+    "default": true
+  },
   "planner_enabled": {
     "description": "让 MiMo 自动决定场景、姿势、服装（不建议开启）",
     "type": "bool",

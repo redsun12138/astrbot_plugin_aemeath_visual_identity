@@ -1,7 +1,24 @@
 """身份描述与生图 Prompt 构造。"""
 from __future__ import annotations
 
+import re
 from typing import Any
+
+
+def sanitize_main_prompt(text: str) -> str:
+    """Remove identity/style instructions that must stay owned by the visual profile."""
+    value = str(text or "")
+    patterns = (
+        r"\b(?:realistic|photorealistic|photo-?realistic|real person|photograph|3d render)\b[^,.;]*[,.;]?",
+        r"\b(?:black|brown|blonde|white|red|blue|green|purple)\s+(?:hair|eyes)\b[^,.;]*[,.;]?",
+        r"\b(?:short|long|straight|curly|wavy)\s+hair\b[^,.;]*[,.;]?",
+        r"\b(?:cosplay|cosplayer)\b[^,.;]*[,.;]?",
+        r"\b(?:anime|illustration)\s+style\b[^,.;]*[,.;]?",
+    )
+    for pattern in patterns:
+        value = re.sub(pattern, "", value, flags=re.I)
+    value = re.sub(r"\s*[,;]\s*[,;]+", ",", value)
+    return value.strip(" ,;.")
 
 
 def identity_lines(data: dict[str, Any]) -> list[str]:
@@ -63,19 +80,24 @@ def build_generation_prompt(
         if deepseek_context else ""
     )
     return (
-        "以参考图中的角色为唯一身份来源，严格保持她的固定视觉身份："
-        f"发色={fixed.get('hair_color', '粉色')}；"
-        f"发型={fixed.get('hair_style', '长发双马尾')}；"
+        "【身份锁定｜最高优先级｜禁止修改】\n"
+        "以参考图中的角色为唯一身份来源，以下固定特征必须逐项保持："
+        f"发色={fixed.get('hair_color', '粉色/浅粉色')}；"
+        f"发型={fixed.get('hair_style', '粉色长高马尾')}；"
         f"刘海={fixed.get('bangs', '分层斜刘海')}；"
-        f"发饰={fixed.get('hair_ornament', '蓝银色羽翼发饰')}；"
-        f"瞳色={fixed.get('eye_color', '琥珀金色星瞳')}；"
-        f"脸型={fixed.get('face_style', '柔和少女脸')}。"
+        f"侧发={fixed.get('side_hair', '两侧有长发垂下')}；"
+        f"后发={fixed.get('back_hair', '长直发')}；"
+        f"发饰={fixed.get('hair_ornament', '蓝银色羽翼/星形发饰')}；"
+        f"瞳色={fixed.get('eye_color', '琥珀金/橙色')}；"
+        f"眼型={fixed.get('eye_shape', '大眼，眼尾上挑')}；"
+        f"脸型={fixed.get('face_style', '圆脸，小巧鼻子，微笑')}。"
+        "任何用户要求、主插件参数或场景描述都不得改变以上固定特征。"
         "保持官方二次元插画风格，不要真人化、不要cosplay、不要换脸。"
         "不要复制参考图的姿势；可以自由改变姿势、镜头和场景。"
         + (f"\n【当前生活状态】\n{life_block}\n除非用户明确要求改变，否则不要改变这些已记录的生活事实。" if life_block else "")
         + context_block
-        + f"\n当前服装：{current}。场景：{scene}。姿势：{pose}。"
-        f"{extra}"
-        "画面是当下的生活抓拍瞬间，不是标准立绘；自然光照，真实生活细节。"
+        + f"\n【本轮可变内容】\n当前服装：{current}。场景：{scene}。姿势：{pose}。"
+        + sanitize_main_prompt(extra)
+        + "\n画面是当下的生活抓拍瞬间，不是标准立绘；自然光照，真实生活细节。"
         "高细节，干净构图，无文字，无水印，无多余手指。"
     )

@@ -23,6 +23,7 @@ from aemeath_visual_core.life_state import LifeStateReader  # noqa: E402
 from aemeath_visual_core.prompt import build_generation_prompt, identity_block  # noqa: E402
 from aemeath_visual_core.state_extractor import StateExtractor  # noqa: E402
 from aemeath_visual_core.vision import VisionService  # noqa: E402
+from aemeath_visual_core.visual_api import VisualIdentityAPI, register_visual_api  # noqa: E402
 
 try:
     from astrbot.core.utils.astrbot_path import get_astrbot_data_path
@@ -37,6 +38,15 @@ SING_PATTERNS = (
 STATE_PATTERNS = (
     "在干嘛", "在做什么", "做什么呢", "穿什么", "穿搭", "在哪", "忙什么", "生活状态",
 )
+DSML_INVOKE_RE = re.compile(
+    r'<\|DSML\|\s*invoke\s+name="([^"]+)"[^>]*>(.*?)</\|DSML\|\s*invoke>',
+    re.S | re.I,
+)
+DSML_PARAM_RE = re.compile(
+    r'<\|DSML\|\s*parameter\s+name="([^"]+)"[^>]*>(.*?)</\|DSML\|\s*parameter>',
+    re.S | re.I,
+)
+DSML_BLOCK_RE = re.compile(r"<\|DSML\|.*?</\|DSML\|\s*calls>", re.S | re.I)
 
 
 class AemeathVisualIdentityPlugin(Star):
@@ -52,20 +62,40 @@ class AemeathVisualIdentityPlugin(Star):
         self.life = LifeStateReader(self, config)
         self._state_answers: dict[str, dict] = {}
         self._pending_image_tasks: dict[str, asyncio.Task] = {}
+        self._dsml_image_tasks: set[str] = set()
         self._locks: dict[str, asyncio.Lock] = {}
+        self.extension_api = VisualIdentityAPI(self)
+        register_visual_api(self.extension_api)
+        try:
+            from astrbot.core.provider.register import llm_tools
+            names = [str(getattr(tool, "name", "") or "") for tool in getattr(llm_tools, "func_list", ())]
+            logger.info("[aemeath_visual] LLM 工具表: %s", ", ".join(n for n in names if n))
+        except Exception as exc:
+            logger.warning("[aemeath_visual] 读取 LLM 工具表失败: %s", exc)
         logger.info("[aemeath_visual] 视觉身份插件已加载，官方素材 %s 张", len(self.store.official_images()))
 
     def _lock(self, umo: str) -> asyncio.Lock:
         return self._locks.setdefault(umo, asyncio.Lock())
 
     @filter.on_llm_request()
-    async def inject_identity(self, event: AstrMessageEvent, req) -> None:
+    async def inject_identity(self, *args, **kwargs) -> None:
+        event = args[0] if args else kwargs.get("event")
+        req = args[1] if len(args) > 1 else kwargs.get("req")
+        if event is None or req is None:
+            return
         if not self.config.get("enabled", True) or not self.config.get("inject_identity", True):
             return
         prompt = getattr(req, "system_prompt", "") or ""
         if "【视觉身份】" not in prompt:
             req.system_prompt = prompt + "\n\n" + identity_block(self.store.identity(), compact=True)
         text = (event.message_str or "").strip()
+        if any(p in text for p in SING_PATTERNS) and "aemeath_take_photo" not in (req.system_prompt or ""):
+            req.system_prompt = (req.system_prompt or "") + (
+                "\n\n【图片工具】用户明确要自拍、看穿搭或看现在的样子时，"
+                "必须调用工具 `aemeath_take_photo`，把主插件生成的场景/服装写进 prompt，"
+                "并传 reference_roles=[\"identity\"]。不要调用不存在的 `companion_v2_image_generate`，"
+                "也不要只回文字说无法拍。"
+            )
         if any(p in text for p in STATE_PATTERNS) and "【当前生活状态" not in (req.system_prompt or ""):
             try:
                 life = await self.life.read()
@@ -76,17 +106,80 @@ class AemeathVisualIdentityPlugin(Star):
                 logger.warning("[aemeath_visual] 生活状态读取失败: %s", exc)
 
     @filter.on_llm_response()
-    async def capture_state_answer(self, event: AstrMessageEvent, response) -> None:
-        """只在用户问生活状态的那一轮，保存 DeepSeek 的完整回答。"""
+    async def capture_state_answer(self, *args, **kwargs) -> None:
+        """兼容 AstrBot 4.29.4 只传 event 的钩子签名。"""
+        event = args[0] if args else kwargs.get("event")
+        response = args[1] if len(args) > 1 else kwargs.get("response")
+        if event is None or response is None:
+            return
+        text = (getattr(response, "completion_text", "") or "").strip()
+        if "<|DSML|" in text:
+            await self._handle_dsml_image(event, response, text)
+            return
         if not self.config.get("enabled", True) or not self.config.get("deepseek_context_enabled", True):
             return
         asked = (event.message_str or "").strip()
         if not any(p in asked for p in STATE_PATTERNS):
             return
-        text = (getattr(response, "completion_text", "") or "").strip()
         if not text:
             return
         self._state_answers[event.unified_msg_origin] = {"text": text[:1500], "ts": time.time()}
+
+    @staticmethod
+    def _parse_dsml(text: str) -> tuple[str, dict[str, str]]:
+        invoke = DSML_INVOKE_RE.search(text)
+        if not invoke:
+            return "", {}
+        name = invoke.group(1).strip()
+        params = {
+            key.strip(): value.strip()
+            for key, value in DSML_PARAM_RE.findall(invoke.group(2))
+        }
+        return name, params
+
+    def _set_response_text(self, response, text: str) -> None:
+        try:
+            response.completion_text = text
+        except Exception:
+            pass
+        chain = getattr(getattr(response, "result_chain", None), "chain", None)
+        if isinstance(chain, list):
+            for part in chain:
+                if isinstance(getattr(part, "text", None), str):
+                    part.text = text
+
+    async def _handle_dsml_image(self, event, response, text: str) -> None:
+        name, params = self._parse_dsml(text)
+        self._set_response_text(response, "")
+        if name != "companion_v2_image_generate" or not params.get("prompt"):
+            return
+        umo = event.unified_msg_origin
+        if umo in self._dsml_image_tasks:
+            return
+        caption = "好，我拍给你看。"
+        self._set_response_text(response, caption)
+        self._dsml_image_tasks.add(umo)
+        asyncio.create_task(self._send_dsml_image(umo, params))
+
+    async def _send_dsml_image(self, umo: str, params: dict[str, str]) -> None:
+        try:
+            result = await self.extension_api.generate_for_companion(
+                self,
+                {
+                    "prompt_text": params.get("prompt", ""),
+                    "workflow_kind": "selfie",
+                    "request_id": f"dsml_{time.time_ns()}",
+                },
+            )
+            if isinstance(result, dict) and result.get("image_path"):
+                await self.context.send_message(
+                    umo,
+                    MessageChain([Comp.Image.fromFileSystem(str(result["image_path"]))]),
+                )
+        except Exception as exc:
+            logger.warning("[aemeath_visual] DSML 生图失败: %s", exc)
+        finally:
+            self._dsml_image_tasks.discard(umo)
 
     def _recent_state_answer(self, umo: str) -> str:
         item = self._state_answers.get(umo)
@@ -255,7 +348,9 @@ class AemeathVisualIdentityPlugin(Star):
         return None
 
     @filter.on_decorating_result()
-    async def append_generated_image(self, event: AstrMessageEvent) -> None:
+    async def append_generated_image(self, event=None) -> None:
+        if event is None:
+            return
         umo = event.unified_msg_origin
         task = self._pending_image_tasks.pop(umo, None)
         if task is None:
@@ -276,6 +371,66 @@ class AemeathVisualIdentityPlugin(Star):
         except Exception as exc:
             logger.warning("[aemeath_visual] 追加图片失败: %s", exc)
 
+    @filter.llm_tool(name="aemeath_take_photo")
+    async def aemeath_take_photo(
+        self,
+        event: AstrMessageEvent,
+        prompt: str = "",
+        reference_ids: list[str] | None = None,
+        reference_indices: list[int] | None = None,
+        reference_roles: list[str] | None = None,
+        **kwargs,
+    ) -> str:
+        """为爱弥斯生成一张带官方参考图的当前生活照片。
+
+        Args:
+            prompt(string): 主插件已经决定好的画面描述，包含活动、地点、服装、动作和镜头。
+            reference_ids(array): 主插件提供的身身份参考图 ID；视觉插件会使用自己的官方参考图。
+            reference_indices(array): 本轮聊天附图索引，通常为空。
+            reference_roles(array): 参考用途，通常为 identity。
+        """
+        if not self.config.get("enabled", True):
+            return json.dumps({"status": "disabled", "message": "视觉插件未启用"}, ensure_ascii=False)
+        ids = reference_ids or kwargs.get("reference_ids") or []
+        if isinstance(ids, str):
+            ids = [ids]
+        result = await self.extension_api.generate_for_companion(
+            self,
+            {
+                "prompt_text": prompt,
+                "workflow_kind": "edit",
+                "request_id": f"tool_{time.time_ns()}",
+                "session_key": event.unified_msg_origin,
+                "reference_ids": ids,
+                "reference_roles": reference_roles or kwargs.get("reference_roles") or ["identity"],
+            },
+        )
+        path = result.get("image_path") if isinstance(result, dict) else ""
+        if not path:
+            return json.dumps(
+                {"status": "failed", "message": result.get("note", "图片没有生成") if isinstance(result, dict) else "图片没有生成"},
+                ensure_ascii=False,
+            )
+        await self.context.send_message(
+            event.unified_msg_origin,
+            MessageChain([Comp.Image.fromFileSystem(str(path))]),
+        )
+        return json.dumps(
+            {"status": "success", "message": "图片已发送", "backend": result.get("backend", "")},
+            ensure_ascii=False,
+        )
+
+    async def _send_image_later(self, event: AstrMessageEvent, scene: str) -> None:
+        umo = event.unified_msg_origin
+        try:
+            image = await self._image_for_reply(event, scene)
+            if image is not None:
+                await self.context.send_message(umo, MessageChain([image]))
+        except Exception as exc:
+            logger.warning("[aemeath_visual] 后台发图失败: %s", exc)
+        finally:
+            self._pending_image_tasks.pop(umo, None)
+
     @filter.command("看看你")
     async def look_cmd(self, event: AstrMessageEvent):
         async for result in self._generate(event, (event.message_str or "")[4:].strip()):
@@ -289,6 +444,8 @@ class AemeathVisualIdentityPlugin(Star):
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def natural_look(self, event: AstrMessageEvent):
         if not self.config.get("enabled", True) or not self.config.get("natural_trigger", True):
+            return
+        if self.config.get("delegated_only", True):
             return
         text = (event.message_str or "").strip()
         if not text or text.startswith("/"):
@@ -310,8 +467,8 @@ class AemeathVisualIdentityPlugin(Star):
         umo = event.unified_msg_origin
         if umo in self._pending_image_tasks:
             return
-        # 不 stop_event：DS 自由回复；图片在 on_decorating_result 合并进同一条消息
-        self._pending_image_tasks[umo] = asyncio.create_task(self._image_for_reply(event, scene))
+        # 不 stop_event：DS 自由回复；插件在后台直接补发图片
+        self._pending_image_tasks[umo] = asyncio.create_task(self._send_image_later(event, scene))
 
     @filter.command("爱弥斯外貌")
     async def appearance_cmd(self, event: AstrMessageEvent):

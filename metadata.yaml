@@ -1,7 +1,7 @@
 name: astrbot_plugin_aemeath_visual_identity
 display_name: 爱弥斯·视觉身份
-version: 0.4.3
-desc: 爱弥斯视觉身份、DeepSeek 上下文记忆、文字图片合并回复
+version: 0.6.3
+desc: 爱弥斯视觉身份、主插件触发 aemeath_take_photo
 author: redsun12138
 repo: https://github.com/redsun12138/astrbot_plugin_aemeath_visual_identity
 astrbot_version: ">=4.24.0"
