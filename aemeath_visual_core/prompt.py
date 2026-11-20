@@ -65,17 +65,17 @@ def build_generation_prompt(
     if not pose:
         pose = "根据当前生活状态自然呈现动作，不要固定站立"
     life_lines = []
-    for key, label in (
-        ("time", "时间"), ("activity", "当前活动"), ("location", "当前地点"),
-        ("outfit", "当前穿搭"), ("mood", "当前情绪"), ("energy", "精力"),
-        ("weather", "天气"), ("sleep", "睡眠状态"),
+    for key, phrase in (
+        ("time", "此刻是{0}"), ("activity", "她正在{0}"), ("location", "她在{0}"),
+        ("outfit", "她穿着{0}"), ("mood", "她的情绪是{0}"), ("energy", "精力{0}"),
+        ("weather", "天气{0}"), ("sleep", "睡眠情况{0}"),
     ):
         if life.get(key):
-            life_lines.append(f"{label}：{life[key]}")
-    life_block = "\n".join(life_lines)
+            life_lines.append(phrase.format(life[key]))
+    life_block = "，".join(life_lines)
     deepseek_context = str(life.get("deepseek_context") or "").strip()
     context_block = (
-        "\n【最近对话中角色的自述（DeepSeek）】\n" + deepseek_context
+        "\n角色最近的自述（只作为场景语义，不要把原句写进画面）：\n" + deepseek_context
         + "\n如果这段自述提到当前活动、地点或穿搭，以这段为准，不要使用官方默认舞台礼服。"
         if deepseek_context else ""
     )
@@ -94,10 +94,14 @@ def build_generation_prompt(
         "任何用户要求、主插件参数或场景描述都不得改变以上固定特征。"
         "保持官方二次元插画风格，不要真人化、不要cosplay、不要换脸。"
         "不要复制参考图的姿势；可以自由改变姿势、镜头和场景。"
-        + (f"\n【当前生活状态】\n{life_block}\n除非用户明确要求改变，否则不要改变这些已记录的生活事实。" if life_block else "")
+        + (f"\n生活背景（只作为画面设定，不要把这段文字画进图）：{life_block}。"
+           "除非用户明确要求改变，否则不要改变这些已记录的生活事实。" if life_block else "")
         + context_block
         + f"\n【本轮可变内容】\n当前服装：{current}。场景：{scene}。姿势：{pose}。"
+        + "\n用户这句话只表达想要的动作和氛围，不要把它当成画面内文字："
         + sanitize_main_prompt(extra)
         + "\n画面是当下的生活抓拍瞬间，不是标准立绘；自然光照，真实生活细节。"
-        "高细节，干净构图，无文字，无水印，无多余手指。"
+        "高细节，干净构图，无多余手指。"
+        "画面中绝对不要出现任何文字、汉字、英文字母、数字、对话气泡、字幕、标签、"
+        "状态栏、HUD、UI、水印、边框或说明文字；不要生成信息卡或截图样式。"
     )
