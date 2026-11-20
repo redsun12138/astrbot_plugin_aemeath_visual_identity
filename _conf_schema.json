@@ -24,6 +24,23 @@
     "type": "bool",
     "default": false
   },
+  "album_enabled": {
+    "description": "按日期保存生成的图片",
+    "hint": "开启后图片会保存到 images/generated/YYYY-MM-DD/，可用 /相册 查看。",
+    "type": "bool",
+    "default": true
+  },
+  "album_max_send": {
+    "description": "/相册 每次最多发送几张",
+    "type": "int",
+    "default": 6
+  },
+  "prompt_writer_enabled": {
+    "description": "桥生图前用模型把用户原话改写为画面 prompt",
+    "hint": "只影响 amo 桥触发；工具路径已经由主模型写好 prompt，不会重复调用。",
+    "type": "bool",
+    "default": true
+  },
   "deepseek_context_enabled": {
     "description": "用 DeepSeek 从会话上下文提取生活状态",
     "type": "bool",
