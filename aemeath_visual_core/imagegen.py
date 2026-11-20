@@ -35,7 +35,12 @@ class ImageGenerator:
         raise ImageGenerationError("所有生图后端都失败：" + " | ".join(errors))
 
     def _new_path(self, suffix: str = ".png") -> Path:
-        return self.output_dir / f"aemeath_{time.time_ns()}{suffix}"
+        if self.config.get("album_enabled", True):
+            folder = self.output_dir / time.strftime("%Y-%m-%d")
+            folder.mkdir(parents=True, exist_ok=True)
+        else:
+            folder = self.output_dir
+        return folder / f"aemeath_{time.time_ns()}{suffix}"
 
     async def _gpt(self, prompt: str, refs: list[Path], size: str) -> Path:
         key = str(self.config.get("gpt_image_api_key", ""))
@@ -67,12 +72,31 @@ class ImageGenerator:
                     if resp.status != 200:
                         raise ImageGenerationError(f"HTTP {resp.status}: {str(data)[:200]}")
         try:
-            raw = data["data"][0]["b64_json"]
+            item = data["data"][0]
         except Exception as exc:
             raise ImageGenerationError(f"返回格式异常: {str(data)[:200]}") from exc
         path = self._new_path(".png")
-        path.write_bytes(base64.b64decode(raw))
-        return path
+        if item.get("b64_json"):
+            try:
+                path.write_bytes(base64.b64decode(item["b64_json"]))
+            except Exception as exc:
+                raise ImageGenerationError(f"base64 图片写入失败: {str(exc)[:160]}") from exc
+            return path
+        if item.get("url"):
+            try:
+                async with aiohttp.ClientSession(
+                    timeout=aiohttp.ClientTimeout(total=120)
+                ) as download:
+                    async with download.get(str(item["url"])) as resp:
+                        if resp.status != 200:
+                            raise ImageGenerationError(f"下载图片 HTTP {resp.status}")
+                        path.write_bytes(await resp.read())
+            except Exception as exc:
+                raise ImageGenerationError(f"下载图片失败: {str(exc)[:160]}") from exc
+            return path
+        raise ImageGenerationError(
+            "返回格式异常（没有 b64_json 或 url）: " + str(data)[:200]
+        )
 
     async def _qwen(self, prompt: str, refs: list[Path], size: str) -> Path:
         key = str(self.config.get("qwen_image_api_key", ""))
