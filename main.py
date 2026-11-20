@@ -7,6 +7,7 @@ import re
 import sys
 import time
 import zipfile
+from datetime import datetime
 from pathlib import Path
 
 import astrbot.api.message_components as Comp
@@ -142,6 +143,10 @@ class AemeathVisualIdentityPlugin(Star):
             response.completion_text = text
         except Exception:
             pass
+        try:
+            response.result_chain = MessageChain([Comp.Plain(text)] if text else [])
+        except Exception:
+            pass
         chain = getattr(getattr(response, "result_chain", None), "chain", None)
         if isinstance(chain, list):
             for part in chain:
@@ -151,7 +156,7 @@ class AemeathVisualIdentityPlugin(Star):
     async def _handle_dsml_image(self, event, response, text: str) -> None:
         name, params = self._parse_dsml(text)
         self._set_response_text(response, "")
-        if name != "companion_v2_image_generate" or not params.get("prompt"):
+        if name not in {"companion_v2_image_generate", "aemeath_take_photo"} or not params.get("prompt"):
             return
         umo = event.unified_msg_origin
         if umo in self._dsml_image_tasks:
@@ -394,31 +399,116 @@ class AemeathVisualIdentityPlugin(Star):
         ids = reference_ids or kwargs.get("reference_ids") or []
         if isinstance(ids, str):
             ids = [ids]
-        result = await self.extension_api.generate_for_companion(
-            self,
-            {
-                "prompt_text": prompt,
-                "workflow_kind": "edit",
-                "request_id": f"tool_{time.time_ns()}",
-                "session_key": event.unified_msg_origin,
-                "reference_ids": ids,
-                "reference_roles": reference_roles or kwargs.get("reference_roles") or ["identity"],
-            },
-        )
-        path = result.get("image_path") if isinstance(result, dict) else ""
-        if not path:
-            return json.dumps(
-                {"status": "failed", "message": result.get("note", "图片没有生成") if isinstance(result, dict) else "图片没有生成"},
-                ensure_ascii=False,
-            )
-        await self.context.send_message(
-            event.unified_msg_origin,
-            MessageChain([Comp.Image.fromFileSystem(str(path))]),
-        )
+        asyncio.create_task(self._tool_image_later(
+            event.unified_msg_origin, prompt, ids,
+            reference_roles or kwargs.get("reference_roles") or ["identity"],
+        ))
         return json.dumps(
-            {"status": "success", "message": "图片已发送", "backend": result.get("backend", "")},
+            {"status": "accepted", "message": "正在生成图片，稍后发送"},
             ensure_ascii=False,
         )
+
+    async def _amo_visual_context(self, umo: str) -> dict:
+        """读取 amo 的实时穿搭/活动；让工具生图不再固定身份默认服装。"""
+        getter = getattr(self.context, "get_registered_star", None)
+        if not callable(getter):
+            return {}
+        try:
+            meta = getter("amo_forever")
+            plugin = getattr(meta, "star_cls", None) or meta
+            bridge = getattr(plugin, "image_bridge", None)
+            reader = getattr(bridge, "visual_context", None)
+            if callable(reader):
+                data = await reader(umo) if hasattr(reader, "__await__") or asyncio.iscoroutinefunction(reader) else reader(umo)
+                return data if isinstance(data, dict) else {}
+        except Exception as exc:
+            logger.warning("[aemeath_visual] 读取 amo 视觉状态失败: %s", exc)
+        return {}
+
+    async def _write_image_prompt(self, umo: str, user_text: str, context: dict) -> str:
+        """用当前会话模型把用户原话改写成纯画面描述。"""
+        provider = None
+        try:
+            provider = await self.context.get_using_provider_async(umo)
+        except Exception as exc:
+            logger.warning("[aemeath_visual] 读取 prompt 模型失败: %s", exc)
+        if provider is None:
+            return ""
+        state_lines = [
+            "时间：" + str(context.get("time") or ""),
+            "当前活动：" + str(context.get("activity") or ""),
+            "地点：" + str(context.get("location") or ""),
+            "当前穿搭：" + str(context.get("outfit") or ""),
+            "情绪：" + str(context.get("mood") or ""),
+        ]
+        system = (
+            identity_block(self.store.identity(), compact=True)
+            + "\n你是画面提示词编剧。只输出一段自然语言的画面描述，供生图模型使用。"
+            "不要输出标题、标签、冒号列表、解释、Markdown 或代码块。"
+            "画面里绝对不能出现文字、汉字、英文字母、数字、对话气泡、字幕、状态栏、"
+            "HUD、UI、水印或边框。"
+        )
+        prompt = (
+            "用户刚刚说：\n" + str(user_text or "") + "\n\n"
+            "当前生活状态：\n" + "\n".join(line for line in state_lines if line.split("：", 1)[-1].strip()) + "\n\n"
+            "请把用户的要求和当前状态合成一段具体的生图画面描述：写清人物动作、姿势、"
+            "镜头距离、光线、环境和她正在做的事；保留用户原话里的意图，但不要把原话直接写成画面文字。"
+            "只输出画面描述本身，2 到 4 句。"
+        )
+        try:
+            response = await provider.text_chat(prompt=prompt, system_prompt=system)
+            text = str(getattr(response, "completion_text", "") or "").strip()
+        except Exception as exc:
+            logger.warning("[aemeath_visual] 生成画面 prompt 失败: %s", exc)
+            return ""
+        text = re.sub(r"^```(?:text|markdown)?\s*|\s*```$", "", text, flags=re.I | re.M).strip()
+        text = re.sub(r"^(?:画面描述|生图提示词|prompt)\s*[:：]\s*", "", text, flags=re.I).strip()
+        return text[:800]
+
+    async def generate_tool_image(self, umo: str, prompt: str, ids: list[str] | None = None,
+                                  roles: list[str] | None = None, write_prompt: bool = False) -> dict:
+        """工具生图的共享执行入口：桥和 LLM tool 都走这里。"""
+        context = await self._amo_visual_context(umo)
+        if write_prompt and self.config.get("prompt_writer_enabled", True):
+            written = await self._write_image_prompt(umo, prompt, context)
+            if written:
+                logger.info("[aemeath_visual] 模型改写生图 prompt 完成: %s", written[:120])
+                prompt = written
+        request = {
+            "prompt_text": prompt,
+            "workflow_kind": "edit",
+            "request_id": f"tool_{time.time_ns()}",
+            "session_key": umo,
+            "reference_ids": ids or [],
+            "reference_roles": roles or ["identity"],
+        }
+        request.update(context)
+        logger.info(
+            "[aemeath_visual] 工具生图参数 -> outfit=%s | activity=%s | place=%s",
+            str(request.get("outfit") or "")[:120],
+            str(request.get("activity") or "")[:80],
+            str(request.get("location") or "")[:80],
+        )
+        result = await self.extension_api.generate_for_companion(self, request)
+        if isinstance(result, dict):
+            logger.info(
+                "[aemeath_visual] 工具生图结果 -> backend=%s path=%s note=%s",
+                str(result.get("backend") or ""),
+                str(result.get("image_path") or ""),
+                str(result.get("note") or "")[:300],
+            )
+        return result
+
+    async def _tool_image_later(self, umo: str, prompt: str, ids: list[str], roles: list[str]) -> None:
+        try:
+            result = await self.generate_tool_image(umo, prompt, ids, roles)
+            path = result.get("image_path") if isinstance(result, dict) else ""
+            if path:
+                await self.context.send_message(umo, MessageChain([Comp.Image.fromFileSystem(str(path))]))
+            else:
+                logger.warning("[aemeath_visual] 工具生图失败: %s", result)
+        except Exception as exc:
+            logger.warning("[aemeath_visual] 工具后台生图失败: %s", exc)
 
     async def _send_image_later(self, event: AstrMessageEvent, scene: str) -> None:
         umo = event.unified_msg_origin
@@ -440,6 +530,57 @@ class AemeathVisualIdentityPlugin(Star):
     async def selfie_cmd(self, event: AstrMessageEvent):
         async for result in self._generate(event, (event.message_str or "")[2:].strip()):
             yield result
+
+    def _album_root(self) -> Path:
+        return self.data_dir / "images" / "generated"
+
+    def _album_days(self) -> dict[str, list[Path]]:
+        root = self._album_root()
+        days: dict[str, list[Path]] = {}
+        if not root.is_dir():
+            return days
+        for entry in root.iterdir():
+            if entry.is_dir() and re.fullmatch(r"\d{4}-\d{2}-\d{2}", entry.name):
+                files = sorted(
+                    (p for p in entry.iterdir() if p.is_file() and p.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp")),
+                    key=lambda p: p.stat().st_mtime,
+                )
+                if files:
+                    days[entry.name] = files
+        for p in root.iterdir():
+            if p.is_file() and p.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp"):
+                day = datetime.fromtimestamp(p.stat().st_mtime).strftime("%Y-%m-%d")
+                days.setdefault(day, []).append(p)
+        return days
+
+    @filter.command("相册")
+    async def album_cmd(self, event: AstrMessageEvent):
+        arg = (event.message_str or "").strip()
+        arg = re.sub(r"^/?相册\s*", "", arg).strip()
+        days = self._album_days()
+        if not days:
+            yield event.plain_result("相册还是空的，先让我拍几张吧。")
+            return
+        if not arg:
+            lines = ["相册里最近这些天："]
+            for day in sorted(days, reverse=True)[:10]:
+                lines.append(f"{day}：{len(days[day])} 张")
+            lines.append("发送 /相册 YYYY-MM-DD 查看当天图片。")
+            yield event.plain_result("\n".join(lines))
+            return
+        if arg in ("今天", "today"):
+            arg = datetime.now().strftime("%Y-%m-%d")
+        elif arg in ("昨天", "yesterday"):
+            arg = datetime.fromtimestamp(time.time() - 86400).strftime("%Y-%m-%d")
+        files = days.get(arg)
+        if not files:
+            yield event.plain_result(f"{arg} 没有图片。")
+            return
+        limit = max(1, min(12, int(self.config.get("album_max_send", 6))))
+        chain = [Comp.Plain(f"{arg} 的相册，共 {len(files)} 张，先发 {min(limit, len(files))} 张：")]
+        for path in files[-limit:]:
+            chain.append(Comp.Image.fromFileSystem(str(path)))
+        yield event.chain_result(chain)
 
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def natural_look(self, event: AstrMessageEvent):
